@@ -1,13 +1,5 @@
 pa rubywrapper
 
-" todo
-" - autoformatting as I type? or at least after move?
-" - eg: @thing = thing
-" - attr_accessor :blah -> initialize(blah) @blah = blah
-"
-" not sure how easy this would be though... maybe a diff on line before and
-" after to see the changes added to target the formatting
-
 fu! s:setup()
 ruby << RUBY
 module NyaoSnippet
@@ -17,37 +9,53 @@ module NyaoSnippet
   class Snippet
     attr_accessor :lines, :il, :fl, :el, :col, :changes, :last_block
     def initialize lines, il, fl, el, col
-      @lines = lines
+      @lines      = lines
       @start_line = fl
-      @fl    = fl
-      @il    = il
-      @el    = el
-      @col   = col
-      @changes = []
+      @fl         = fl
+      @il         = il
+      @el         = el
+      @col        = col
+      @changes    = []
     end
 
-    def eval_rc original_ruby_code
-      return "#{LB} #{ original_ruby_code } #{RB}" unless @changes.any?
-      rc = original_ruby_code.sub(/__/, '"'+@changes.last+'"')
+    def rewrap code
+      "#{LB}#{ code }#{RB}"
+    end
+
+    def eval_rc original_ruby_code, current_line=false
+      return rewrap(original_ruby_code) unless @changes.any?
+
+      rc = nil
+
+      if current_line
+        rc = original_ruby_code.sub(/__/, '"'+@changes.last+'"')
+      elsif !current_line && original_ruby_code.match?('__') # can't eval yet
+        return rewrap(original_ruby_code)
+      else
+        rc = original_ruby_code.clone
+      end
+
       subs = rc.scan(/_\d+/)
       subs.each do |s|
-        change_nr = s.match(/(\d+)/)[1].to_i
+        change_nr = s.match(/_(\d+)/)[1].to_i
         if @changes[change_nr]
           rc.sub! s, '"'+@changes[change_nr]+'"'
         else
-          return "#{LB} #{ original_ruby_code } #{RB}"
+          return rewrap(original_ruby_code)
         end
       end
 
+      # we're not quite clever enough here if we end up replacing __ on a line
+      # like <_0>.<__>
       eval(rc)
     rescue Exception => e
-      raise original_ruby_code.inspect + "--" + e.inspect
+      raise original_ruby_code.inspect + " -- " + e.inspect
     end
 
     def change_next first_change=false
       if !first_change
-        @changes << Vim::Buffer.current.line[@col..Ev.col('.')]
-        @changes[-1] = eval_rc(@last_block)
+        @changes << Vim::Buffer.current.line[@col..Ev.col('.')-1]
+        @changes[-1] = eval_rc(@last_block, true)
         lines[il].insert(@col, @changes.last)
       end
       i      = nil
@@ -55,24 +63,30 @@ module NyaoSnippet
       last_i = nil
       sl     = fl
       lines[il..].each_with_index do |l, li|
+        unless l.match?(/#{LB}.*__.*#{RB}/)
+          next
+        end
         @col = i = l.index(LB)
         if i
           @fl = lnum = sl+li
           @il = il+li
           @last_block = l.match(/#{LB}(.*)#{RB}/)[1]
           l.sub!(/#{LB}.*#{RB}/, '')
-          # Ev.setline(lnum, l)
           render
           Ex.normal! "#{lnum}gg0#{i}l"
           break
         end
       end
       if lnum
-        Ex["startinsert!"]
+        if @col == lines[@il].length
+          Ex["startinsert!"]
+        else
+          Ex["startinsert"]
+        end
       else
         $exit_insert_mode_via_enter.restore
         $exit_insert_mode_via_tab.restore
-        puts @changes.inspect
+        render # one last render in case we just added the _num for an earlier line
       end
     rescue => e
       $exit_insert_mode_via_enter.restore
@@ -80,50 +94,33 @@ module NyaoSnippet
       raise e
     end
 
-    # def change_next_old first_change=false
-    #   if !first_change
-    #     @changes << Vim::Buffer.current.line[@col..Ev.col('.')]
-    #     lines[il].insert(@col, @changes.last)
-    #   end
-    #   i      = nil
-    #   lnum   = nil
-    #   last_i = nil
-    #   sl     = fl
-    #   lines[il..].each_with_index do |l, li|
-    #     @col = i = l.index('__')
-    #     if i
-    #       @fl = lnum = sl+li
-    #       @il = il+li
-    #       l.sub!('__', '')
-    #       # Ev.setline(lnum, l)
-    #       render
-    #       Ex.normal! "#{lnum}gg0#{i}l"
-    #       break
-    #     end
-    #   end
-    #   if lnum
-    #     Ex["startinsert!"]
-    #   else
-    #     $exit_insert_mode_via_enter.restore
-    #     $exit_insert_mode_via_tab.restore
-    #     puts @changes.inspect
-    #   end
-    # end
-
     def render
       lines.each_with_index do |l, i|
         lnum = @start_line+i
 
         block = l.match(/#{LB}(.*)#{RB}/)&.[](1)
         if block
-          l = l.sub(/#{LB}.*#{RB}/, eval_rc(block))
+          r = eval_rc(block)
+          if r.is_a? String
+            l.sub!(/#{LB}.*#{RB}/, r)
+          elsif r.is_a? Array
+            indent = l.match(/(\s*)/)[1]
+            r.map! {|x| indent + x }
+            lines[i] = r
+            lines.flatten!
+            # sus but easy
+            render
+            return
+          else
+            raise "unsupported type `#{r}` from snippet block"
+          end
         end
 
-        if lnum <= @el
+        if lnum < @el
           NyaoSnippet.setline(lnum, l)
         else
-          # if we do this, we need to start expanding @el for further updates
-          NyaoSnippet.append(lnum-1, l)
+          NyaoSnippet.appendline(lnum-1, l)
+          @el += 1 # this is ok because we do one at a time
         end
       end
     end
@@ -172,16 +169,12 @@ module NyaoSnippet
     line[ri..li] = ''
     line.insert(ri, lines[0].sub(/\s*/, ''))
     lines[0] = line
-    # Ev.setline('.', line)
     setline('.', line)
-    # Ev.append('.', lines[1..])
     appendline('.', lines[1..])
     fl       = Ev.line('.')
     el       = fl + lines.length
     $snippet = Snippet.new(lines, 0, fl, el, cc)
 
-    # this is a risky way to do it because if you exit insert mode some other way
-    # I cannot guarentee the snippet is cleaned up
     $exit_insert_mode_via_enter.set_rhs '<Esc>:ruby $snippet.change_next<CR>'
     $exit_insert_mode_via_tab.set_rhs '<Esc>:ruby $snippet.change_next<CR>'
     $snippet.change_next true
@@ -199,7 +192,7 @@ vno \jp <Esc>:ruby NyaoSnippet.new_snippet<CR>
 augroup NyaoSnippets
   autocmd!
 
-  au BufEnter *.snippet nno <buffer> <CR> ciw__<ESC>
+  au BufEnter *.snippet nno <buffer> <CR> ciw《 __ 》<ESC>
   au BufEnter *.snippet ino <buffer> < 《
   au BufEnter *.snippet ino <buffer> > 》
 augroup END

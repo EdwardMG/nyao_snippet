@@ -1,0 +1,7 @@
+class 《 __.split(' ').map(&:capitalize).join('') 》
+  attr_accessor 《 __.split(' ').map{|x| ":#{x}" }.join(', ') 》
+
+  def initialize 《 _1.split(', ').map{|x| x[1..] }.join(', ') 》
+    《 _1.split(', ').map{|x| "@#{x[1..]} = #{x[1..]}" } 》
+  end
+end
