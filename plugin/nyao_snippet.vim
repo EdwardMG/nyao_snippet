@@ -2,10 +2,137 @@ pa rubywrapper
 
 fu! s:setup()
 ruby << RUBY
+class String
+  def words    = split(' ')
+  def list     = split(',')
+  def snake    = words.join('_')
+  def key_list = list.map { ':'+_1.snake }.unlist
+end
+
+class Array
+  def unlist  = join(', ')
+  def unwords = join(' ')
+end
+
 module NyaoSnippet
+  class Line
+    LB = '《'.force_encoding Encoding::UTF_8
+    RB = '》'.force_encoding Encoding::UTF_8
+
+    attr_accessor :s, :changes
+    def initialize s, changes
+      @s       = s.force_encoding Encoding::UTF_8
+      @changes = changes
+    end
+
+    def lb_indexes
+      r = []
+      i = -1
+      while i = s.index(LB, i+1)
+        r << i
+      end
+      r
+    end
+
+    def blocks
+      lb_indexes.map do |i|
+        s[i..s.index(RB, i+1)]
+      end
+    end
+
+    def first_index_requiring_input
+      lb_indexes.each do |i|
+        return i if requires_input? i
+      end
+    end
+
+    def indexes_for_resolvable_non_interactive_blocks
+      lb_indexes.select do |i|
+        next false if block_at(i).match? /__/
+        resolvable = true
+        block_at(i).scan(/_(\d+)/).flatten.each do |d|
+          unless changes[d.to_i]
+            resolvable = false
+            break
+          end
+        end
+        resolvable
+      end
+    end
+
+    def indexes_for_resolvable_interactive_blocks
+      lb_indexes.select do |i|
+        next false unless block_at(i).match? /__/
+        resolvable = true
+        block_at(i).scan(/_(\d+)/).flatten.each do |d|
+          unless changes[d.to_i]
+            resolvable = false
+            break
+          end
+        end
+        resolvable
+      end
+    end
+
+    def requires_change?(i) = block_at(i).match? /_\d+/
+    def requires_input?(i)  = block_at(i).match? /__/
+    def inner_blocks        = blocks.map {|b| b[1..-2] }
+
+    def get_block_index nr
+      bs = lb_indexes
+      raise "Tried to remove #{nr} from lb_indexes but it is not present. #{s.inspect}" if nr > bs.length-1
+      bs[nr]
+    end
+
+    def remove_block(nr)      = remove_block_at get_block_index(nr)
+    def change_block(nr, str) = change_block_at get_block_index(nr), str
+
+    def block_at(i)
+      raise "Tried to get block at #{i} but index was not on LB but `#{s[i]}`" unless s[i] == LB
+      s[i..s.index(RB, i+1)]
+    end
+
+    def remove_block_at i
+      raise "Tried to remove block at #{i} but index was not on LB but `#{s[i]}`" unless s[i] == LB
+      s[i..s.index(RB, i+1)] = ''
+      self
+    end
+
+    def change_block_at i, obj
+      raise "Tried to change block at #{i} but index was not on LB but `#{s[i]}`" unless s[i] == LB
+      if obj.is_a? Array
+        obj
+      else
+        s[i..s.index(RB, i+1)] = obj
+      end
+      self
+    end
+
+    def rewrap code
+      "#{LB}#{ code }#{RB}"
+    end
+
+    def eval_evalable_blocks current_line=false
+      indexes_for_resolvable_non_interactive_blocks.reverse.each do |i|
+        b = block_at(i)[1..-2]
+
+        b.scan(/_(\d+)/).flatten.each do |nr|
+          change = @changes[nr.to_i]
+          if change.is_a? Array
+            b.gsub! '_'+nr, @changes[nr.to_i].inspect
+          else
+            b.gsub! '_'+nr, '"'+@changes[nr.to_i].sq+'"'
+          end
+        end
+        change_block_at i, eval(b)
+      end
+
+      return self
+    end
+  end
+
   LB = '《'.force_encoding Encoding::UTF_8
   RB = '》'.force_encoding Encoding::UTF_8
-
   class Snippet
     attr_accessor :lines, :il, :fl, :el, :col, :changes, :last_block
     def initialize lines, il, fl, el, col
@@ -28,7 +155,7 @@ module NyaoSnippet
       rc = nil
 
       if current_line
-        rc = original_ruby_code.sub(/__/, '"'+@changes.last+'"')
+        rc = original_ruby_code.sub(/__/, '"'+(@changes.last||'')+'"')
       elsif !current_line && original_ruby_code.match?('__') # can't eval yet
         return rewrap(original_ruby_code)
       else
@@ -45,8 +172,6 @@ module NyaoSnippet
         end
       end
 
-      # we're not quite clever enough here if we end up replacing __ on a line
-      # like <_0>.<__>
       eval(rc)
     rescue Exception => e
       raise original_ruby_code.inspect + " -- " + e.inspect
@@ -54,31 +179,34 @@ module NyaoSnippet
 
     def change_next first_change=false
       if !first_change
-        @changes << Vim::Buffer.current.line[@col..Ev.col('.')-1]
-        @changes[-1] = eval_rc(@last_block, true)
-        lines[il].insert(@col, @changes.last)
+        change = Vim::Buffer.current.line[@col-1..Ev.col('.')-1]
+        @changes << change if change
+        @changes[-1] = eval_rc(@last_block[1..-2], true) if change
+        lines[il].insert(@col-1, @changes.last) if change
       end
       i      = nil
       lnum   = nil
       last_i = nil
       sl     = fl
+      append_to_end = false
       lines[il..].each_with_index do |l, li|
-        unless l.match?(/#{LB}.*__.*#{RB}/)
-          next
-        end
-        @col = i = l.index(LB)
+        line = Line.new(l, changes)
+        line.eval_evalable_blocks
+        i = line.indexes_for_resolvable_interactive_blocks.first
+        @col = i+1 if i
         if i
           @fl = lnum = sl+li
           @il = il+li
-          @last_block = l.match(/#{LB}(.*)#{RB}/)[1]
-          l.sub!(/#{LB}.*#{RB}/, '')
+          @last_block = line.block_at i
+          append_to_end = i + @last_block.length == l.length
+          l[i..line.s.index(RB, i+1)] = ''
           render
           Ex.normal! "#{lnum}gg0#{i}l"
           break
         end
       end
       if lnum
-        if @col == lines[@il].length
+        if append_to_end
           Ex["startinsert!"]
         else
           Ex["startinsert"]
@@ -98,11 +226,11 @@ module NyaoSnippet
       lines.each_with_index do |l, i|
         lnum = @start_line+i
 
-        block = l.match(/#{LB}(.*)#{RB}/)&.[](1)
+        block = l.match(/#{LB}([^#{LB}]+?)#{RB}/, i)&.[](1)
         if block
           r = eval_rc(block)
           if r.is_a? String
-            l.sub!(/#{LB}.*#{RB}/, r)
+            l.sub!(/#{LB}.+?#{RB}/, r)
           elsif r.is_a? Array
             indent = l.match(/(\s*)/)[1]
             r.map! {|x| indent + x }
@@ -142,7 +270,7 @@ module NyaoSnippet
   def self.fetch_snippet name
     path = "#{ENV['HOME']}/.vim/snippets/#{name}.snippet"
     if File.exist? path
-      lines = File.readlines(path, chomp: true)#.map {|l| l.force_encoding Encoding::UTF_8 }
+      lines = File.readlines(path, chomp: true)
       indent = Vim::Buffer.current.line.match(/(\s*)/)[1]
       lines.map! { _1.length > 0 ? indent + _1 : '' }
     end
@@ -177,6 +305,7 @@ module NyaoSnippet
 
     $exit_insert_mode_via_enter.set_rhs '<Esc>:ruby $snippet.change_next<CR>'
     $exit_insert_mode_via_tab.set_rhs '<Esc>:ruby $snippet.change_next<CR>'
+
     $snippet.change_next true
   end
 end
@@ -198,3 +327,4 @@ augroup NyaoSnippets
 augroup END
 
 call s:setup()
+
