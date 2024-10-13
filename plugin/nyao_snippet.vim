@@ -2,6 +2,9 @@ pa rubywrapper
 
 fu! s:setup()
 ruby << RUBY
+# Bugs:
+# - last line of class snippet not being processed
+
 class String
   def words    = split(' ')
   def list     = split(',')
@@ -41,9 +44,7 @@ module NyaoSnippet
     end
 
     def first_index_requiring_input
-      lb_indexes.each do |i|
-        return i if requires_input? i
-      end
+      lb_indexes.find {|i| requires_input? i }
     end
 
     def indexes_for_resolvable_non_interactive_blocks
@@ -78,6 +79,11 @@ module NyaoSnippet
     def requires_input?(i)  = block_at(i).match? /__/
     def inner_blocks        = blocks.map {|b| b[1..-2] }
 
+    def inner_block_at(i)
+      b = block_at(i)
+      b[1..-2] if b
+    end
+
     def get_block_index nr
       bs = lb_indexes
       raise "Tried to remove #{nr} from lb_indexes but it is not present. #{s.inspect}" if nr > bs.length-1
@@ -101,6 +107,8 @@ module NyaoSnippet
     def change_block_at i, obj
       raise "Tried to change block at #{i} but index was not on LB but `#{s[i]}`" unless s[i] == LB
       if obj.is_a? Array
+        indent = s.match(/(\s*)/)[1]
+        obj.map! {|x| indent + x }
         obj
       else
         s[i..s.index(RB, i+1)] = obj
@@ -112,11 +120,13 @@ module NyaoSnippet
       "#{LB}#{ code }#{RB}"
     end
 
-    def eval_evalable_blocks current_line=false
+    def eval_evalable_blocks update_input_with_most_recent_change=false
       indexes_for_resolvable_non_interactive_blocks.reverse.each do |i|
         b = block_at(i)[1..-2]
 
         b.scan(/_(\d+)/).flatten.each do |nr|
+          # why would changes ever be an array of arrays?
+          # because it could be the result of another block
           change = @changes[nr.to_i]
           if change.is_a? Array
             b.gsub! '_'+nr, @changes[nr.to_i].inspect
@@ -127,9 +137,20 @@ module NyaoSnippet
         change_block_at i, eval(b)
       end
 
+      if update_input_with_most_recent_change
+        i = first_index_requiring_input
+        if i
+          b = inner_block_at i
+          b.sub!('__', '"'+@changes.last.sq+'"')
+          r = eval(b)
+          change_block_at i, r
+          @changes[-1] = r
+        end
+      end
+
       return self
     end
-  end
+  end ## Line
 
   LB = '《'.force_encoding Encoding::UTF_8
   RB = '》'.force_encoding Encoding::UTF_8
@@ -149,40 +170,23 @@ module NyaoSnippet
       "#{LB}#{ code }#{RB}"
     end
 
-    def eval_rc original_ruby_code, current_line=false
-      return rewrap(original_ruby_code) unless @changes.any?
-
-      rc = nil
-
-      if current_line
-        rc = original_ruby_code.sub(/__/, '"'+(@changes.last||'')+'"')
-      elsif !current_line && original_ruby_code.match?('__') # can't eval yet
-        return rewrap(original_ruby_code)
-      else
-        rc = original_ruby_code.clone
-      end
-
-      subs = rc.scan(/_\d+/)
-      subs.each do |s|
-        change_nr = s.match(/_(\d+)/)[1].to_i
-        if @changes[change_nr]
-          rc.sub! s, '"'+@changes[change_nr]+'"'
-        else
-          return rewrap(original_ruby_code)
-        end
-      end
-
-      eval(rc)
-    rescue Exception => e
-      raise original_ruby_code.inspect + " -- " + e.inspect
-    end
-
     def change_next first_change=false
       if !first_change
-        change = Vim::Buffer.current.line[@col-1..Ev.col('.')-1]
+        # wanted to use Ev.col here, but does not play well with multibytes
+        # this still seems to have problems
+        bline = Vim::Buffer.current.line
+        end_i = bline.length - @last_line_without_block_to_change.s.length
+        change = bline[@col-1..@col-1+end_i-1]
+        TextDebug << "change: "+change.inspect
+
         @changes << change if change
-        @changes[-1] = eval_rc(@last_block[1..-2], true) if change
-        lines[il].insert(@col-1, @changes.last) if change
+        @last_line.changes = @changes
+
+        @last_line.eval_evalable_blocks true
+        lines[il] = @last_line.s
+        lines.flatten!
+        # missing last _1 line for some reason
+        render
       end
       i      = nil
       lnum   = nil
@@ -190,20 +194,27 @@ module NyaoSnippet
       sl     = fl
       append_to_end = false
       lines[il..].each_with_index do |l, li|
-        line = Line.new(l, changes)
-        line.eval_evalable_blocks
+        line = Line.new(l.clone, changes)
+        # line.eval_evalable_blocks
+
         i = line.indexes_for_resolvable_interactive_blocks.first
         @col = i+1 if i
         if i
-          @fl = lnum = sl+li
-          @il = il+li
-          @last_block = line.block_at i
+          @fl           = lnum = sl+li
+          @il           = il+li
+          @last_block   = line.block_at i
           append_to_end = i + @last_block.length == l.length
-          l[i..line.s.index(RB, i+1)] = ''
+          @last_line    = line
+          @last_line_without_block_to_change = Line.new(l, changes)
+          @last_line_without_block_to_change.remove_block_at i
+          # @last_line_without_block_to_change.eval_evalable_blocks
+
+          # l[i..line.s.index(RB, i+1)] = ''
           render
           Ex.normal! "#{lnum}gg0#{i}l"
           break
         end
+        @last_line = nil
       end
       if lnum
         if append_to_end
@@ -215,6 +226,7 @@ module NyaoSnippet
         $exit_insert_mode_via_enter.restore
         $exit_insert_mode_via_tab.restore
         render # one last render in case we just added the _num for an earlier line
+
       end
     rescue => e
       $exit_insert_mode_via_enter.restore
@@ -223,31 +235,47 @@ module NyaoSnippet
     end
 
     def render
+      # if we do this here, we will screw up last_line_without_block_to_change
+      # and the compare won't work anymore
+      # puts changes.inspect
+      # lines.map!.with_index do |l, i|
+      #   l = Line.new(l, changes)
+      #   l.eval_evalable_blocks
+      #   l.s
+      # end
+      # lines.flatten!
       lines.each_with_index do |l, i|
         lnum = @start_line+i
 
-        block = l.match(/#{LB}([^#{LB}]+?)#{RB}/, i)&.[](1)
-        if block
-          r = eval_rc(block)
-          if r.is_a? String
-            l.sub!(/#{LB}.+?#{RB}/, r)
-          elsif r.is_a? Array
-            indent = l.match(/(\s*)/)[1]
-            r.map! {|x| indent + x }
-            lines[i] = r
-            lines.flatten!
-            # sus but easy
-            render
-            return
-          else
-            raise "unsupported type `#{r}` from snippet block"
-          end
-        end
+        # block = l.match(/#{LB}([^#{LB}]+?)#{RB}/, i)&.[](1)
+        # if block
+        #   r = eval_rc(block)
+        #   if r.is_a? String
+        #     l.sub!(/#{LB}.+?#{RB}/, r)
+        #   elsif r.is_a? Array
+        #     indent = l.match(/(\s*)/)[1]
+        #     r.map! {|x| indent + x }
+        #     lines[i] = r
+        #     lines.flatten!
+        #     # sus but easy
+        #     render
+        #     return
+        #   else
+        #     raise "unsupported type `#{r}` from snippet block"
+        #   end
+        # end
+        l = Line.new(l, changes)
+        l.eval_evalable_blocks
 
         if lnum < @el
-          NyaoSnippet.setline(lnum, l)
+          if l.s.is_a? Array
+            puts 'hi'
+            NyaoSnippet.setline(lnum, l.s[0])
+          else
+            NyaoSnippet.setline(lnum, l.s)
+          end
         else
-          NyaoSnippet.appendline(lnum-1, l)
+          NyaoSnippet.appendline(lnum-1, l.s)
           @el += 1 # this is ok because we do one at a time
         end
       end
@@ -287,6 +315,8 @@ module NyaoSnippet
   end
 
   def self.fill
+    TextDebug.clear
+    TextDebug << "start"
     cc           = Ev.col('.')
     line         = Ev.getline('.')
     ri           = (line.rindex(/[\s\.]/, cc-1) || -1)+1
@@ -317,6 +347,8 @@ endfu
 ino <CR> <CR>
 ino jp <Esc>:ruby NyaoSnippet.fill<CR>
 vno \jp <Esc>:ruby NyaoSnippet.new_snippet<CR>
+
+nno \m :messages<CR>
 
 augroup NyaoSnippets
   autocmd!
