@@ -2,9 +2,6 @@ pa rubywrapper
 
 fu! s:setup()
 ruby << RUBY
-# Bugs:
-# - last line of class snippet not being processed
-
 class String
   def words    = split(' ')
   def list     = split(',')
@@ -106,12 +103,14 @@ module NyaoSnippet
 
     def change_block_at i, obj
       raise "Tried to change block at #{i} but index was not on LB but `#{s[i]}`" unless s[i] == LB
+      raise "Tried to change block in #{self} but obj was #{obj.inspect}" unless obj.is_a?(Array) || obj.is_a?(String)
       if obj.is_a? Array
         indent = s.match(/(\s*)/)[1]
         obj.map! {|x| indent + x }
-        obj
-      else
-        s[i..s.index(RB, i+1)] = obj
+        @s = obj
+      elsif obj.is_a?(String)
+        raise "Line has been malformed #{self.inspect}" if @s.nil?
+        @s[i..s.index(RB, i+1)] = obj
       end
       self
     end
@@ -125,8 +124,6 @@ module NyaoSnippet
         b = block_at(i)[1..-2]
 
         b.scan(/_(\d+)/).flatten.each do |nr|
-          # why would changes ever be an array of arrays?
-          # because it could be the result of another block
           change = @changes[nr.to_i]
           if change.is_a? Array
             b.gsub! '_'+nr, @changes[nr.to_i].inspect
@@ -177,7 +174,7 @@ module NyaoSnippet
         bline = Vim::Buffer.current.line
         end_i = bline.length - @last_line_without_block_to_change.s.length
         change = bline[@col-1..@col-1+end_i-1]
-        TextDebug << "change: "+change.inspect
+        # TextDebug << "change: "+change.inspect
 
         @changes << change if change
         @last_line.changes = @changes
@@ -185,7 +182,6 @@ module NyaoSnippet
         @last_line.eval_evalable_blocks true
         lines[il] = @last_line.s
         lines.flatten!
-        # missing last _1 line for some reason
         render
       end
       i      = nil
@@ -195,7 +191,6 @@ module NyaoSnippet
       append_to_end = false
       lines[il..].each_with_index do |l, li|
         line = Line.new(l.clone, changes)
-        # line.eval_evalable_blocks
 
         i = line.indexes_for_resolvable_interactive_blocks.first
         @col = i+1 if i
@@ -207,9 +202,7 @@ module NyaoSnippet
           @last_line    = line
           @last_line_without_block_to_change = Line.new(l, changes)
           @last_line_without_block_to_change.remove_block_at i
-          # @last_line_without_block_to_change.eval_evalable_blocks
 
-          # l[i..line.s.index(RB, i+1)] = ''
           render
           Ex.normal! "#{lnum}gg0#{i}l"
           break
@@ -235,49 +228,21 @@ module NyaoSnippet
     end
 
     def render
-      # if we do this here, we will screw up last_line_without_block_to_change
-      # and the compare won't work anymore
-      # puts changes.inspect
-      # lines.map!.with_index do |l, i|
-      #   l = Line.new(l, changes)
-      #   l.eval_evalable_blocks
-      #   l.s
-      # end
-      # lines.flatten!
-      lines.each_with_index do |l, i|
-        lnum = @start_line+i
-
-        # block = l.match(/#{LB}([^#{LB}]+?)#{RB}/, i)&.[](1)
-        # if block
-        #   r = eval_rc(block)
-        #   if r.is_a? String
-        #     l.sub!(/#{LB}.+?#{RB}/, r)
-        #   elsif r.is_a? Array
-        #     indent = l.match(/(\s*)/)[1]
-        #     r.map! {|x| indent + x }
-        #     lines[i] = r
-        #     lines.flatten!
-        #     # sus but easy
-        #     render
-        #     return
-        #   else
-        #     raise "unsupported type `#{r}` from snippet block"
-        #   end
-        # end
+      lines.map!.with_index do |l, i|
         l = Line.new(l, changes)
         l.eval_evalable_blocks
-
+        l.s
+      end
+      lines.flatten!
+      lnum = @start_line
+      lines.each_with_index do |l, i|
         if lnum < @el
-          if l.s.is_a? Array
-            puts 'hi'
-            NyaoSnippet.setline(lnum, l.s[0])
-          else
-            NyaoSnippet.setline(lnum, l.s)
-          end
+          NyaoSnippet.setline(lnum, l)
         else
-          NyaoSnippet.appendline(lnum-1, l.s)
+          NyaoSnippet.appendline(lnum-1, l)
           @el += 1 # this is ok because we do one at a time
         end
+        lnum += 1
       end
     end
   end
@@ -315,8 +280,8 @@ module NyaoSnippet
   end
 
   def self.fill
-    TextDebug.clear
-    TextDebug << "start"
+    # TextDebug.clear
+    # TextDebug << "start"
     cc           = Ev.col('.')
     line         = Ev.getline('.')
     ri           = (line.rindex(/[\s\.]/, cc-1) || -1)+1
@@ -347,6 +312,12 @@ endfu
 ino <CR> <CR>
 ino jp <Esc>:ruby NyaoSnippet.fill<CR>
 vno \jp <Esc>:ruby NyaoSnippet.new_snippet<CR>
+
+" fu! s:HardReset()
+"   nno <Tab> <Tab>
+"   nno <CR> <CR>
+" endfu
+" nno \R :call <SID>HardReset()<CR>
 
 nno \m :messages<CR>
 
