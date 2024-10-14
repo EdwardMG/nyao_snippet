@@ -309,17 +309,10 @@ $exit_insert_mode_via_tab   = Mapping.new 'i', '<Tab>'
 RUBY
 endfu
 
-ino <CR> <CR>
-ino jp <Esc>:ruby NyaoSnippet.fill<CR>
-vno \jp <Esc>:ruby NyaoSnippet.new_snippet<CR>
-
-" fu! s:HardReset()
-"   nno <Tab> <Tab>
-"   nno <CR> <CR>
-" endfu
-" nno \R :call <SID>HardReset()<CR>
-
-nno \m :messages<CR>
+if exists('g:nyao_always_add_mappings') && g:nyao_always_add_mappings
+  ino jp <Esc>:ruby NyaoSnippet.fill<CR>
+  vno \jp <Esc>:ruby NyaoSnippet.new_snippet<CR>
+endif
 
 augroup NyaoSnippets
   autocmd!
