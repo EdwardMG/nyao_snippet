@@ -261,8 +261,14 @@ module NyaoSnippet
   end
 
   def self.fetch_snippet name
-    path = "#{ENV['HOME']}/.vim/snippets/#{name}.snippet"
-    if File.exist? path
+    ft      = Var['&filetype']
+    ft_path = "#{ENV['HOME']}/.vim/snippets/#{ft}_#{name}.snippet"
+    path    = "#{ENV['HOME']}/.vim/snippets/#{name}.snippet"
+    if File.exist? ft_path
+      lines = File.readlines(ft_path, chomp: true)
+      indent = Vim::Buffer.current.line.match(/(\s*)/)[1]
+      lines.map! { _1.length > 0 ? indent + _1 : '' }
+    elsif File.exist? path
       lines = File.readlines(path, chomp: true)
       indent = Vim::Buffer.current.line.match(/(\s*)/)[1]
       lines.map! { _1.length > 0 ? indent + _1 : '' }
@@ -272,6 +278,17 @@ module NyaoSnippet
   def self.new_snippet
     trigger = Ev.input("Snippet trigger: ")
     path    = "#{ENV['HOME']}/.vim/snippets/#{trigger}.snippet"
+    lines   = VisualSelection.new.outer
+    indent = lines[0].match(/(\s*)/)[1]
+    lines.each { _1.sub! indent, '' }
+    File.write(path, lines.join("\n"))
+    Ex.edit path
+  end
+
+  def self.new_filetype_snippet
+    trigger = Ev.input("Snippet trigger: ")
+    ft      = Var['&filetype']
+    path    = "#{ENV['HOME']}/.vim/snippets/#{ft}_#{name}.snippet"
     lines   = VisualSelection.new.outer
     indent = lines[0].match(/(\s*)/)[1]
     lines.each { _1.sub! indent, '' }
@@ -312,6 +329,7 @@ endfu
 if exists('g:nyao_always_add_mappings') && g:nyao_always_add_mappings
   ino jp <Esc>:ruby NyaoSnippet.fill<CR>
   vno \jp <Esc>:ruby NyaoSnippet.new_snippet<CR>
+  vno \jP <Esc>:ruby NyaoSnippet.new_filetype_snippet<CR>
 endif
 
 augroup NyaoSnippets

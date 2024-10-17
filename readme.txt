@@ -26,6 +26,13 @@ _0 .. _n refer to a previously made change at a __, 0 indexed.
 
   should be a visual mapping
 
+<Esc>:ruby NyaoSnippet.new_filetype_snippet
+
+  create a new template using the visually selected text that will trigger
+  only for the current filetype
+
+  should be a visual mapping
+
 <Mappings in .snippet buffer>
 
 In normal mode
@@ -35,6 +42,11 @@ ruby code
 In insert mode
   < or > will result in 《 and 》respectively (nyaosnippets block
 delimiters)
+
+EXTRA
+
+To make the snippet apply only to certain filetypes, rename the snippet
+filename filetype + '_' + original name. eg: def.snippet -> javascript_def.snippet
 
 vim:autoindent noexpandtab tabstop=8 shiftwidth=8
 vim:se modifiable
